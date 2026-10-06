@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Home Assistant Energy CSV Converter</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background-color: #f4f6f9;
+            color: #333;
+            margin: 0;
+            padding: 20px;
+            display: flex;
+            justify-content: center;
+        }
+        .container {
+            background: #ffffff;
+            border-radius: 8px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+            width: 100%;
+            max-width: 800px;
+            padding: 24px;
+        }
+        h1 {
+            font-size: 22px;
+            margin-top: 0;
+            color: #03a9f4;
+        }
+        .form-group {
+            margin-bottom: 16px;
+        }
+        label {
+            display: block;
+            font-weight: 600;
+            margin-bottom: 6px;
+            font-size: 14px;
+        }
+        input[type="text"], textarea {
+            width: 100%;
+            padding: 10px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            font-family: monospace;
+            font-size: 13px;
+            box-sizing: border-box;
+        }
+        textarea {
+            height: 180px;
+            resize: vertical;
+        }
+        button {
+            background-color: #03a9f4;
+            color: white;
+            border: none;
+            padding: 10px 18px;
+            font-size: 14px;
+            font-weight: 600;
+            border-radius: 4px;
+            cursor: pointer;
+            margin-right: 8px;
+        }
+        button:hover {
+            background-color: #0288d1;
+        }
+        button.secondary {
+            background-color: #607d8b;
+        }
+        button.secondary:hover {
+            background-color: #455a64;
+        }
+        .output-section {
+            margin-top: 24px;
+        }
+        .actions {
+            margin-top: 10px;
+        }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h1>Home Assistant Energy CSV Converter</h1>
+    <p style="font-size: 13px; color: #666;">Converts raw 30-minute interval CSV data (`Period`, `Current`) into hourly aggregated Home Assistant statistics format (`statistic_id`, `unit`, `start`, `state`, `sum`).</p>
+
+    <div class="form-group">
+        <label for="startingSum">Starting Cumulative Sum (Baseline kWh):</label>
+        <input type="text" id="startingSum" value="364.379">
+    </div>
+
+    <div class="form-group">
+        <label for="rawInput">Paste Raw CSV Data Here:</label>
+        <textarea id="rawInput" placeholder='"Period","Current"
+"2026-10-05 00:30:00","0.593"
+"2026-10-05 01:00:00","0.477"'></textarea>
+    </div>
+
+    <button onclick="convertData()">Convert to Hourly CSV</button>
+
+    <div class="output-section">
+        <label for="csvOutput">Converted Output:</label>
+        <textarea id="csvOutput" placeholder="Converted CSV will appear here..." readonly style="background: #fafafa;"></textarea>
+        <div class="actions">
+            <button class="secondary" onclick="copyToClipboard()">Copy to Clipboard</button>
+            <button class="secondary" onclick="downloadCSV()">Download CSV File</button>
+        </div>
+    </div>
+</div>
+
+<script>
+let finalCsvContent = "";
+
+function convertData() {
+    const rawText = document.getElementById('rawInput').value.trim();
+    let startingSum = parseFloat(document.getElementById('startingSum').value) || 0.0;
+
+    if (!rawText) {
+        alert("Please paste your raw CSV data first.");
+        return;
+    }
+
+    const lines = rawText.split('\n');
+    let hourlyMap = {};
+
+    // Skip header if present (check if first line contains 'Period' or 'Current')
+    let startIndex = 0;
+    if (lines[0].toLowerCase().includes('period') || lines[0].toLowerCase().includes('current')) {
+        startIndex = 1;
+    }
+
+    // Parse lines and aggregate by hour floor
+    for (let i = startIndex; i < lines.length; i++) {
+        let line = lines[i].trim();
+        if (!line) continue;
+
+        // Clean up quotes and split by comma
+        let parts = line.split(/,(?=(?:(?:[^"]*"){2})*[^"]*$)/);
+        if (parts.length < 2) continue;
+
+        let periodStr = parts[0].replace(/"/g, '').trim();
+        let currentVal = parseFloat(parts[1].replace(/"/g, '').trim()) || 0.0;
+
+        // Parse date
+        let dateObj = new Date(periodStr.replace(' ', 'T'));
+        if (isNaN(dateObj)) continue;
+
+        // Floor to hour
+        dateObj.setMinutes(0, 0, 0);
+        let year = dateObj.getFullYear();
+        let month = String(dateObj.getMonth() + 1).padStart(2, '0');
+        let day = String(dateObj.getDate()).padStart(2, '0');
+        let hour = String(dateObj.getHours()).padStart(2, '0');
+        
+        let hourKey = `${year}-${month}-${day} ${hour}:00`;
+
+        if (!hourlyMap[hourKey]) {
+            hourlyMap[hourKey] = 0.0;
+        }
+        hourlyMap[hourKey] += currentVal;
+    }
+
+    // Build sorted hourly array & calculate running sum
+    let sortedKeys = Object.keys(hourlyMap).sort();
+    let csvRows = ["statistic_id,unit,start,state,sum"];
+    let runningSum = startingSum;
+
+    sortedKeys.forEach(key => {
+        let stateVal = hourlyMap[key];
+        runningSum += stateVal;
+        
+        let roundedState = stateVal.toFixed(3);
+        let roundedSum = runningSum.toFixed(3);
+
+        csvRows.push(`sensor.grid_consumption,kWh,${key},${roundedState},${roundedSum}`);
+    });
+
+    finalCsvContent = csvRows.join('\n');
+    document.getElementById('csvOutput').value = finalCsvContent;
+}
+
+function copyToClipboard() {
+    const outputBox = document.getElementById('csvOutput');
+    if (!outputBox.value) {
+        alert("Nothing to copy!");
+        return;
+    }
+    outputBox.select();
+    document.execCommand('copy');
+    alert("Converted CSV copied to clipboard!");
+}
+
+function downloadCSV() {
+    if (!finalCsvContent) {
+        alert("Please convert data first.");
+        return;
+    }
+    const blob = new Blob([finalCsvContent], { type: 'text/csv;charset=utf-8;' });
+    const link = document.createElement("a");
+    const url = URL.createObjectURL(blob);
+    link.setAttribute("href", url);
+    link.setAttribute("download", "ha_energy_import.csv");
+    link.style.visibility = 'hidden';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+}
+</script>
+
+</body>
+</html>
